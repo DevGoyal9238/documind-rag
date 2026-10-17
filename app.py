@@ -1,11 +1,12 @@
 import sys
 from pypdf.errors import PdfReadError
 from src.pdf_loader import extract_text_from_pdf, NoTextExtractedError
+from src.text_chunker import chunk_pages
 
 
 def main():
     print("=" * 45)
-    print("      DocuMind - PDF Text Extractor")
+    print("      DocuMind - RAG Document Processor")
     print("=" * 45)
 
     # 1. Accept file path via command line argument or interactive input
@@ -22,22 +23,21 @@ def main():
         print("Error: No file path provided.")
         return
 
-    # 2. Extract text with specific error handling
+    # 2. Extract text and chunk with error handling
     try:
         pages = extract_text_from_pdf(pdf_path)
-        print(f"\n[Success] Extracted {len(pages)} page(s) from '{pdf_path}':\n")
+        print(f"\n[Success] Extracted {len(pages)} page(s) from '{pdf_path}'.")
 
-        for page in pages:
-            print(f"--- Page {page['page_number']} ---")
-            text = page["text"].strip()
-            if text:
-                print(text)
-            else:
-                print("[No text content on this page]")
+        chunks = chunk_pages(pages, chunk_size=500, chunk_overlap=100)
+        print(f"[Success] Generated {len(chunks)} chunk(s) (chunk_size=500, overlap=100):\n")
+
+        for chunk in chunks:
+            print(f"--- Chunk {chunk['chunk_id']} [Page {chunk['page_number']} | {len(chunk['text'])} chars] ---")
+            print(chunk["text"])
             print()
 
         print("=" * 45)
-        print("Extraction complete.")
+        print("Processing complete.")
         print("=" * 45)
 
     except FileNotFoundError as err:
