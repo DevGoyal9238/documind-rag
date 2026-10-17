@@ -13,6 +13,7 @@ from src.vector_store import (
     store_chunks,
     query_chunks,
 )
+from src.qa_generator import generate_answer
 
 
 def main():
@@ -118,6 +119,43 @@ def main():
                     )
                     print(res["text"])
                     print()
+
+                # 6. RAG Answer Generation (Milestone 6 - Gemini LLM)
+                print("=" * 45)
+                print("       AI Study Assistant (Gemini RAG)")
+                print("=" * 45)
+
+                try:
+                    answer_data = generate_answer(query, chroma_results)
+                    print(f"\n{answer_data['answer']}\n")
+
+                    # Format retrieved context citations cleanly without nested f-strings
+                    formatted_sources: list[str] = []
+                    for src in answer_data.get("sources", []):
+                        page = src.get("page_number")
+                        chunk = src.get("chunk_id")
+                        if page is not None and chunk is not None:
+                            formatted_sources.append(f"Page {page} (Chunk {chunk})")
+                        elif page is not None:
+                            formatted_sources.append(f"Page {page}")
+
+                    if formatted_sources:
+                        unique_sources: list[str] = []
+                        seen_sources: set[str] = set()
+                        for s in formatted_sources:
+                            if s not in seen_sources:
+                                seen_sources.add(s)
+                                unique_sources.append(s)
+                        citations_str = ", ".join(unique_sources)
+                        print(f"Retrieved Sources: {citations_str}\n")
+
+                except ValueError as err:
+                    # Catches missing or placeholder GEMINI_API_KEY without leaking secrets
+                    print(f"\n[Note] LLM answer generation skipped: {err}")
+                    print("Semantic search results above remain fully available.\n")
+                except Exception as err:
+                    # Catches API connection/quota errors without crashing the application
+                    print(f"\n[Generation Notice] Could not complete LLM generation: {err}\n")
             else:
                 print("No query provided. Skipping search.\n")
 
