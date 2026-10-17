@@ -5,12 +5,13 @@ retrieved context chunks, strict anti-hallucination prompting, and citation trac
 """
 
 import os
+import re
 from typing import Any
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
-DEFAULT_MODEL_NAME = "gemini-2.5-flash"
+DEFAULT_MODEL_NAME = "gemini-3.8-flash"
 FALLBACK_ABSTENTION_MESSAGE = "I cannot find the answer to your question in the provided document."
 FALLBACK_EMPTY_CONTEXT_MESSAGE = "No relevant document context found to answer the question."
 MAX_CONTEXT_CHARACTERS = 40000
@@ -201,6 +202,69 @@ User Question: {clean_question}
 Answer:"""
 
 
+def _sanitize_error_text(text: str) -> str:
+    """
+    Sanitizes raw error strings to prevent accidental leakage of API keys,
+    bearer tokens, and sensitive query parameters in exception logs or CLI output.
+    """
+    if not text:
+        return ""
+
+    sanitized = text
+
+    # Redact active GEMINI_API_KEY from environment if present
+    env_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if env_key and len(env_key) > 5:
+        sanitized = sanitized.replace(env_key, "[REDACTED_KEY]")
+
+    # Redact standard Google AI Studio / Gemini API key patterns (AIzaSy...)
+    sanitized = re.sub(r"AIza[0-9A-Za-z_-]{35}", "[REDACTED_KEY]", sanitized)
+
+    # Redact query parameters like ?key=..., &auth_token=..., etc.
+    sanitized = re.sub(r"(?i)(key|token|auth|secret|password)=[^&\s'\"`]+", r"\1=[REDACTED]", sanitized)
+
+    # Redact Bearer tokens
+    sanitized = re.sub(r"(?i)bearer\s+[a-zA-Z0-9_\-\.]+", "Bearer [REDACTED]", sanitized)
+
+    # Collapse multiple whitespace/newlines into clean single space
+    sanitized = re.sub(r"\s+", " ", sanitized).strip()
+
+    return sanitized
+
+
+def format_api_error_diagnostic(err: Exception) -> str:
+    """
+    Extracts safe, non-sensitive diagnostic details from an API exception.
+    Includes the exception class name, HTTP status code (if available),
+    status enum (if available), and sanitized message.
+    """
+    err_cls = type(err).__name__
+    code = getattr(err, "code", None) or getattr(err, "status_code", None)
+    status = getattr(err, "status", None)
+
+    # Prefer specific message attribute if present, otherwise fallback to str(err)
+    raw_msg = getattr(err, "message", None)
+    if not raw_msg or not isinstance(raw_msg, str):
+        raw_msg = str(err)
+
+    clean_msg = _sanitize_error_text(raw_msg)
+
+    # Build structured diagnostic tokens: e.g. "ClientError [HTTP 404 NOT_FOUND]"
+    diag_parts: list[str] = [err_cls]
+    if code is not None and status is not None:
+        diag_parts.append(f"[HTTP {code} {status}]")
+    elif code is not None:
+        diag_parts.append(f"[HTTP {code}]")
+    elif status is not None:
+        diag_parts.append(f"[{status}]")
+
+    diagnostic_header = " ".join(diag_parts)
+
+    if clean_msg:
+        return f"{diagnostic_header}: {clean_msg}"
+    return diagnostic_header
+
+
 def generate_answer(
     question: str,
     context_chunks: list[dict[str, Any]],
@@ -223,7 +287,7 @@ def generate_answer(
         question: User search query.
         context_chunks: Retrieved document chunks with text and page metadata.
         client: Optional pre-configured genai.Client instance (for testing/dependency injection).
-        model_name: Gemini model identifier (default: gemini-2.5-flash).
+        model_name: Gemini model identifier (default: gemini-3.8-flash).
         temperature: Sampling temperature (default: 0.0 for minimum variance).
 
     Returns:
@@ -284,10 +348,10 @@ def generate_answer(
             config=config,
         )
     except Exception as err:
-        # Wrap API errors securely without exposing raw exception details (which may leak keys or URLs).
-        # Preserve exception chaining (from err) for debugging while keeping the message safe.
+        diagnostic = format_api_error_diagnostic(err)
         raise RuntimeError(
-            f"Gemini API generation failed ({type(err).__name__}). Please check your API key, network connection, or quota."
+            f"Gemini API generation failed ({diagnostic}). "
+            "Please check your API key, model availability, network connection, or quota."
         ) from err
 
     # 6. Extract generated text safely

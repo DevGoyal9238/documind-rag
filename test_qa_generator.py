@@ -18,6 +18,7 @@ from src.qa_generator import (
     format_context_block,
     build_rag_prompt,
     generate_answer,
+    format_api_error_diagnostic,
 )
 
 
@@ -29,8 +30,9 @@ class TestLoadApiKey(unittest.TestCase):
         key = load_gemini_api_key()
         self.assertEqual(key, "[REDACTED_HISTORICAL_FIXTURE]")
 
+    @patch("src.qa_generator.load_dotenv")
     @patch.dict(os.environ, {}, clear=True)
-    def test_missing_api_key_raises_value_error(self):
+    def test_missing_api_key_raises_value_error(self, mock_load_dotenv):
         with self.assertRaises(ValueError) as ctx:
             load_gemini_api_key()
         self.assertIn("not configured", str(ctx.exception).lower())
@@ -209,7 +211,7 @@ class TestGenerateAnswerOfflineMocks(unittest.TestCase):
             question="What is DocuMind?",
             context_chunks=self.valid_chunks,
             client=self.mock_client,
-            model_name="gemini-2.5-flash",
+            model_name="gemini-3.8-flash",
             temperature=0.0,
         )
 
@@ -217,12 +219,12 @@ class TestGenerateAnswerOfflineMocks(unittest.TestCase):
         self.assertEqual(len(result["sources"]), 1)
         self.assertEqual(result["sources"][0]["page_number"], 1)
         self.assertEqual(result["sources"][0]["chunk_id"], 1)
-        self.assertEqual(result["model"], "gemini-2.5-flash")
+        self.assertEqual(result["model"], "gemini-3.8-flash")
         self.assertFalse(result["abstention"])
 
         self.mock_client.models.generate_content.assert_called_once()
         call_kwargs = self.mock_client.models.generate_content.call_args[1]
-        self.assertEqual(call_kwargs["model"], "gemini-2.5-flash")
+        self.assertEqual(call_kwargs["model"], "gemini-3.8-flash")
         self.assertEqual(call_kwargs["config"].temperature, 0.0)
         self.assertIn("What is DocuMind?", call_kwargs["contents"])
 
@@ -253,10 +255,13 @@ class TestGenerateAnswerOfflineMocks(unittest.TestCase):
         self.assertTrue(result["abstention"])
 
     def test_api_error_wrapped_in_runtime_error(self):
-        sensitive_payload = "https://generativelanguage.googleapis.com?key=[REDACTED_HISTORICAL_FIXTURE]"
-        self.mock_client.models.generate_content.side_effect = ConnectionError(
-            f"Quota exceeded with sensitive URL: {sensitive_payload}"
+        mock_err = ConnectionError(
+            "Quota exceeded with sensitive URL: https://generativelanguage.googleapis.com?key=[REDACTED_HISTORICAL_FIXTURE]"
         )
+        setattr(mock_err, "code", 429)
+        setattr(mock_err, "status", "RESOURCE_EXHAUSTED")
+        setattr(mock_err, "message", "Quota exceeded with sensitive URL: https://generativelanguage.googleapis.com?key=[REDACTED_HISTORICAL_FIXTURE]")
+        self.mock_client.models.generate_content.side_effect = mock_err
 
         with self.assertRaises(RuntimeError) as ctx:
             generate_answer(
@@ -267,11 +272,13 @@ class TestGenerateAnswerOfflineMocks(unittest.TestCase):
         err_msg = str(ctx.exception)
         self.assertIn("Gemini API generation failed", err_msg)
         self.assertIn("ConnectionError", err_msg)
+        # Verify diagnostic includes HTTP code and status
+        self.assertIn("HTTP 429 RESOURCE_EXHAUSTED", err_msg)
         # Verify sensitive payload from original exception is NOT exposed in RuntimeError string
         self.assertNotIn("[REDACTED_HISTORICAL_FIXTURE]", err_msg)
-        self.assertNotIn("sensitive URL", err_msg)
+        self.assertIn("key=[REDACTED]", err_msg)
         # Verify exception chaining (__cause__) is preserved for debugging
-        self.assertIsInstance(ctx.exception.__cause__, ConnectionError)
+        self.assertIs(ctx.exception.__cause__, mock_err)
 
     def test_invalid_input_types_rejected(self):
         with self.assertRaises(TypeError):
@@ -282,6 +289,47 @@ class TestGenerateAnswerOfflineMocks(unittest.TestCase):
             generate_answer("   ", self.valid_chunks, client=self.mock_client)
         with self.assertRaises(TypeError):
             generate_answer("What is DocuMind?", "not a list", client=self.mock_client)  # type: ignore[arg-type]
+
+
+class TestErrorDiagnosticSanitization(unittest.TestCase):
+    """Tests diagnostic extraction and secret redacting from API exceptions."""
+
+    def test_http_status_code_and_status_in_diagnostic(self):
+        mock_err = Exception("Model not found")
+        setattr(mock_err, "code", 404)
+        setattr(mock_err, "status", "NOT_FOUND")
+        setattr(mock_err, "message", "This model models/gemini-2.5-flash is no longer available.")
+
+        diag = format_api_error_diagnostic(mock_err)
+        self.assertIn("Exception [HTTP 404 NOT_FOUND]", diag)
+        self.assertIn("models/gemini-2.5-flash is no longer available", diag)
+
+    def test_secrets_redacted_from_diagnostic_message(self):
+        sensitive_key = "[REDACTED_HISTORICAL_FIXTURE]"
+        mock_err = Exception(
+            f"Unauthorized: https://api.google.com/v1beta?key={sensitive_key}&token=secret_pass_123 with Bearer my_jwt_token_456"
+        )
+        diag = format_api_error_diagnostic(mock_err)
+
+        self.assertNotIn(sensitive_key, diag)
+        self.assertNotIn("secret_pass_123", diag)
+        self.assertNotIn("my_jwt_token_456", diag)
+        self.assertIn("key=[REDACTED]", diag)
+        self.assertIn("token=[REDACTED]", diag)
+        self.assertIn("Bearer [REDACTED]", diag)
+
+    @patch.dict(os.environ, {"GEMINI_API_KEY": "[REDACTED_HISTORICAL_FIXTURE]"}, clear=True)
+    def test_loaded_env_api_key_redacted(self):
+        mock_err = Exception("Failed call for key [REDACTED_HISTORICAL_FIXTURE] in request header")
+        diag = format_api_error_diagnostic(mock_err)
+
+        self.assertNotIn("[REDACTED_HISTORICAL_FIXTURE]", diag)
+        self.assertIn("[REDACTED_KEY]", diag)
+
+    def test_generic_exception_without_http_code(self):
+        err = TimeoutError("Connection timed out waiting for gateway")
+        diag = format_api_error_diagnostic(err)
+        self.assertEqual(diag, "TimeoutError: Connection timed out waiting for gateway")
 
 
 class TestGeminiRealApiSmoke(unittest.TestCase):
