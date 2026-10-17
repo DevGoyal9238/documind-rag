@@ -1,1 +1,2 @@
 pypdf>=5.0.0
+sentence-transformers>=3.0.0

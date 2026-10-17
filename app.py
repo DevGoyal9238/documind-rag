@@ -2,6 +2,7 @@ import sys
 from pypdf.errors import PdfReadError
 from src.pdf_loader import extract_text_from_pdf, NoTextExtractedError
 from src.text_chunker import chunk_pages
+from src.embedder import embed_chunks
 
 
 def main():
@@ -23,7 +24,7 @@ def main():
         print("Error: No file path provided.")
         return
 
-    # 2. Extract text and chunk with error handling
+    # 2. Extract text, chunk, and embed with error handling
     try:
         pages = extract_text_from_pdf(pdf_path)
         print(f"\n[Success] Extracted {len(pages)} page(s) from '{pdf_path}'.")
@@ -35,6 +36,17 @@ def main():
             print(f"--- Chunk {chunk['chunk_id']} [Page {chunk['page_number']} | {len(chunk['text'])} chars] ---")
             print(chunk["text"])
             print()
+
+        # 3. Generate dense vector embeddings
+        print("Generating dense vector embeddings (sentence-transformers/all-MiniLM-L6-v2)...")
+        embedded_chunks = embed_chunks(chunks)
+        print(f"[Success] Embedded {len(embedded_chunks)} chunk(s).")
+
+        if embedded_chunks:
+            dim = len(embedded_chunks[0]["embedding"])
+            preview = [round(val, 4) for val in embedded_chunks[0]["embedding"][:5]]
+            print(f"Embedding Vector Dimension: {dim}")
+            print(f"Sample preview (Chunk 1, first 5 dimensions): {preview} ...\n")
 
         print("=" * 45)
         print("Processing complete.")
