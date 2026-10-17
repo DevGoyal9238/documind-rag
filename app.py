@@ -1,9 +1,18 @@
 import sys
+from pathlib import Path
 from pypdf.errors import PdfReadError
 from src.pdf_loader import extract_text_from_pdf, NoTextExtractedError
 from src.text_chunker import chunk_pages
-from src.embedder import embed_chunks
+from src.embedder import embed_chunks, get_embedding_model
 from src.semantic_search import search_chunks
+from src.vector_store import (
+    DEFAULT_CHROMA_DIR,
+    DEFAULT_COLLECTION_NAME,
+    get_chroma_client,
+    get_or_create_collection,
+    store_chunks,
+    query_chunks,
+)
 
 
 def main():
@@ -25,7 +34,7 @@ def main():
         print("Error: No file path provided.")
         return
 
-    # 2. Extract text, chunk, embed, and search with error handling
+    # 2. Extract text, chunk, embed, store, and search with error handling
     try:
         pages = extract_text_from_pdf(pdf_path)
         print(f"\n[Success] Extracted {len(pages)} page(s) from '{pdf_path}'.")
@@ -49,7 +58,19 @@ def main():
             print(f"Embedding Vector Dimension: {dim}")
             print(f"Sample preview (Chunk 1, first 5 dimensions): {preview} ...\n")
 
-            # 4. Interactive semantic search
+            # 4. Store in ChromaDB vector store
+            print("=" * 45)
+            print("       ChromaDB Vector Database")
+            print("=" * 45)
+            doc_id = Path(pdf_path).stem or "doc"
+            client = get_chroma_client(DEFAULT_CHROMA_DIR)
+            collection = get_or_create_collection(client, DEFAULT_COLLECTION_NAME)
+            upserted = store_chunks(embedded_chunks, collection, document_id=doc_id)
+            print(f"[Success] Upserted {upserted} chunk(s) into ChromaDB (document_id='{doc_id}').")
+            print(f"Total chunks in collection '{DEFAULT_COLLECTION_NAME}': {collection.count()}")
+            print("Note: Upsert prevents duplicate database records, but PDF extraction and embeddings are recomputed per run.\n")
+
+            # 5. Interactive semantic search
             print("=" * 45)
             print("           Semantic Search")
             print("=" * 45)
@@ -66,15 +87,34 @@ def main():
 
             if query:
                 print(f"\nSearching for chunks relevant to: '{query}'...")
-                results = search_chunks(query, embedded_chunks, top_k=3)
-                print(f"[Success] Retrieved {len(results)} top matching chunk(s):\n")
+                model = get_embedding_model()
 
-                for rank, res in enumerate(results, start=1):
+                # NumPy search (Milestone 5 - In-memory exact search)
+                numpy_results = search_chunks(query, embedded_chunks, top_k=3, model=model)
+
+                # ChromaDB search (Milestone 5.5 - Persistent vector database)
+                raw_query_emb = model.encode([query], show_progress_bar=False)
+                query_vector = raw_query_emb[0]
+                chroma_results = query_chunks(query_vector, collection, top_k=3, document_id=doc_id)
+
+                print(f"\n--- [NumPy Search Results] (In-memory Exact Dot Product) ---")
+                for rank, res in enumerate(numpy_results, start=1):
                     score = res["similarity_score"]
                     pct = score * 100
                     print(
-                        f"--- Rank {rank} | Chunk {res['chunk_id']} [Page {res['page_number']}] "
-                        f"| Similarity: {score:.4f} ({pct:.1f}%) ---"
+                        f"Rank {rank} | Chunk {res['chunk_id']} [Page {res['page_number']}] "
+                        f"| Similarity: {score:.4f} ({pct:.1f}%)"
+                    )
+                    print(res["text"])
+                    print()
+
+                print(f"--- [ChromaDB Search Results] (Persistent Cosine Index) ---")
+                for rank, res in enumerate(chroma_results, start=1):
+                    score = res["similarity_score"]
+                    dist = res["cosine_distance"]
+                    print(
+                        f"Rank {rank} | Chunk {res['chunk_id']} [Page {res['page_number']}] "
+                        f"| ID: {res['id']} | Similarity: {score:.4f} | Distance: {dist:.4f}"
                     )
                     print(res["text"])
                     print()

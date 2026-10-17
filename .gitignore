@@ -19,3 +19,6 @@ Thumbs.db
 
 # Local interview preparation guide
 INTERVIEW_PREP.md
+
+# Persistent ChromaDB vector store
+chroma_db/
