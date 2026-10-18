@@ -14,6 +14,7 @@ from src.qa_generator import (
     FALLBACK_EMPTY_CONTEXT_MESSAGE,
     MAX_CONTEXT_CHARACTERS,
     load_gemini_api_key,
+    get_gemini_model_name,
     get_gemini_client,
     format_context_block,
     build_rag_prompt,
@@ -24,7 +25,7 @@ from src.qa_generator import (
 
 
 class TestLoadApiKey(unittest.TestCase):
-    """Tests secure environment variable retrieval for Gemini API key."""
+    """Tests secure environment variable and Streamlit secrets retrieval for Gemini API key."""
 
     @patch.dict(os.environ, {"GEMINI_API_KEY": "mock_valid_gemini_api_key_12345"}, clear=True)
     def test_valid_api_key_loaded(self):
@@ -47,6 +48,86 @@ class TestLoadApiKey(unittest.TestCase):
     def test_placeholder_api_key_raises_value_error(self):
         with self.assertRaises(ValueError):
             load_gemini_api_key()
+
+    @patch("src.qa_generator.load_dotenv")
+    @patch.dict(os.environ, {}, clear=True)
+    def test_streamlit_secrets_fallback(self, mock_load_dotenv):
+        """Verifies fallback to st.secrets when environment variable is unset."""
+        mock_st = MagicMock()
+        mock_st.secrets = {"GEMINI_API_KEY": "mock_streamlit_secret_key_67890"}
+        with patch.dict("sys.modules", {"streamlit": mock_st}):
+            key = load_gemini_api_key()
+            self.assertEqual(key, "mock_streamlit_secret_key_67890")
+
+    @patch.dict(os.environ, {"GEMINI_API_KEY": "mock_env_key_priority_111"}, clear=True)
+    def test_env_var_precedence_over_streamlit_secrets(self):
+        """Verifies environment variables take precedence over st.secrets."""
+        mock_st = MagicMock()
+        mock_st.secrets = {"GEMINI_API_KEY": "mock_streamlit_key_222"}
+        with patch.dict("sys.modules", {"streamlit": mock_st}):
+            key = load_gemini_api_key()
+            self.assertEqual(key, "mock_env_key_priority_111")
+
+    @patch.dict(os.environ, {"GEMINI_API_KEY": "your_gemini_api_key_here"}, clear=True)
+    def test_placeholder_in_env_falls_back_to_streamlit_secrets(self):
+        """Verifies fallback to st.secrets if environment only contains the default placeholder."""
+        mock_st = MagicMock()
+        mock_st.secrets = {"GEMINI_API_KEY": "mock_valid_st_key_from_secrets"}
+        with patch.dict("sys.modules", {"streamlit": mock_st}):
+            key = load_gemini_api_key()
+            self.assertEqual(key, "mock_valid_st_key_from_secrets")
+
+    @patch("src.qa_generator.load_dotenv")
+    @patch.dict(os.environ, {}, clear=True)
+    def test_streamlit_secrets_exception_handled_safely(self, mock_load_dotenv):
+        """Verifies clean failure when accessing st.secrets raises an unexpected exception."""
+        mock_st = MagicMock()
+        type(mock_st).secrets = unittest.mock.PropertyMock(side_effect=RuntimeError("No secrets file"))
+        with patch.dict("sys.modules", {"streamlit": mock_st}):
+            with self.assertRaises(ValueError) as ctx:
+                load_gemini_api_key()
+            self.assertIn("not configured", str(ctx.exception).lower())
+
+
+class TestGetGeminiModelName(unittest.TestCase):
+    """Tests model resolution order across explicit args, env vars, Streamlit secrets, and defaults."""
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_default_model_name(self):
+        model = get_gemini_model_name()
+        self.assertEqual(model, DEFAULT_MODEL_NAME)
+        self.assertEqual(model, "gemini-3.8-flash")
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_explicit_argument_override(self):
+        model = get_gemini_model_name("gemini-2.0-flash")
+        self.assertEqual(model, "gemini-2.0-flash")
+
+    @patch.dict(os.environ, {"GEMINI_MODEL": "gemini-1.5-flash"}, clear=True)
+    def test_env_var_model_selection(self):
+        model = get_gemini_model_name()
+        self.assertEqual(model, "gemini-1.5-flash")
+
+    @patch.dict(os.environ, {"GEMINI_MODEL": "gemini-1.5-flash"}, clear=True)
+    def test_explicit_arg_overrides_env_var(self):
+        model = get_gemini_model_name("gemini-custom-pro")
+        self.assertEqual(model, "gemini-custom-pro")
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_streamlit_secrets_model_fallback(self):
+        mock_st = MagicMock()
+        mock_st.secrets = {"GEMINI_MODEL": "gemini-2.5-flash"}
+        with patch.dict("sys.modules", {"streamlit": mock_st}):
+            model = get_gemini_model_name()
+            self.assertEqual(model, "gemini-2.5-flash")
+
+    @patch.dict(os.environ, {"GEMINI_MODEL": "gemini-env-choice"}, clear=True)
+    def test_env_var_precedence_over_streamlit_secrets_model(self):
+        mock_st = MagicMock()
+        mock_st.secrets = {"GEMINI_MODEL": "gemini-secrets-choice"}
+        with patch.dict("sys.modules", {"streamlit": mock_st}):
+            model = get_gemini_model_name()
+            self.assertEqual(model, "gemini-env-choice")
 
 
 class TestFormatContextBlock(unittest.TestCase):
@@ -228,6 +309,21 @@ class TestGenerateAnswerOfflineMocks(unittest.TestCase):
         self.assertEqual(call_kwargs["model"], "gemini-3.8-flash")
         self.assertEqual(call_kwargs["config"].temperature, 0.0)
         self.assertIn("What is DocuMind?", call_kwargs["contents"])
+
+    @patch.dict(os.environ, {"GEMINI_MODEL": "gemini-1.5-flash"}, clear=True)
+    def test_generate_answer_respects_env_model_override(self):
+        mock_response = MagicMock()
+        mock_response.text = "DocuMind is an AI assistant."
+        self.mock_client.models.generate_content.return_value = mock_response
+
+        result = generate_answer(
+            question="What is DocuMind?",
+            context_chunks=self.valid_chunks,
+            client=self.mock_client,
+        )
+        self.assertEqual(result["model"], "gemini-1.5-flash")
+        call_kwargs = self.mock_client.models.generate_content.call_args[1]
+        self.assertEqual(call_kwargs["model"], "gemini-1.5-flash")
 
     def test_abstention_response_detected(self):
         mock_response = MagicMock()

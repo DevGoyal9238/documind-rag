@@ -1,0 +1,19 @@
+# Streamlit Application Configuration
+# This file contains public, non-sensitive UI and server settings.
+# It is safe to commit to version control.
+# Sensitive API keys must NEVER be placed in this file; use environment variables
+# or Streamlit Community Cloud Secrets (which map to .streamlit/secrets.toml locally).
+
+[server]
+headless = true
+maxUploadSize = 25
+
+[client]
+showErrorDetails = "none"
+
+[theme]
+primaryColor = "#4285F4"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F8F9FA"
+textColor = "#202124"
+font = "sans serif"

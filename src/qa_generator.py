@@ -19,11 +19,17 @@ MAX_CONTEXT_CHARACTERS = 40000
 
 def load_gemini_api_key(env_var_name: str = "GEMINI_API_KEY") -> str:
     """
-    Lazily loads the Gemini API key from the environment or a local .env file.
+    Lazily loads the Gemini API key from the environment, local .env file,
+    or Streamlit secrets.
+
+    Resolution order:
+        1. Environment variable (or local .env via python-dotenv).
+        2. Streamlit secrets (st.secrets[env_var_name]) when running in Streamlit.
 
     Guarantees:
-        - Never prints, logs, or leaks the raw API key in error messages.
+        - Never prints, logs, or leaks the raw API key in error messages or logs.
         - Raises a clean, descriptive ValueError if the key is missing or is the default placeholder.
+        - Streamlit context is completely optional; does not fail in non-Streamlit environments.
 
     Args:
         env_var_name: Environment variable name to look up (default: GEMINI_API_KEY).
@@ -32,18 +38,66 @@ def load_gemini_api_key(env_var_name: str = "GEMINI_API_KEY") -> str:
         The validated API key string.
 
     Raises:
-        ValueError: If the environment variable is unset, empty, or set to placeholder text.
+        ValueError: If the key is unset, empty, or set to placeholder text.
     """
     load_dotenv()
     api_key = os.environ.get(env_var_name, "").strip()
 
+    # If missing or placeholder in environment, check Streamlit secrets as fallback
+    if not api_key or api_key == "your_gemini_api_key_here":
+        try:
+            import streamlit as st
+            if hasattr(st, "secrets") and env_var_name in st.secrets:
+                secret_val = st.secrets[env_var_name]
+                if isinstance(secret_val, str) and secret_val.strip():
+                    api_key = secret_val.strip()
+        except Exception:
+            # Safely ignore missing secrets.toml or Streamlit execution context exceptions
+            pass
+
     if not api_key or api_key == "your_gemini_api_key_here":
         raise ValueError(
             f"{env_var_name} is not configured. "
-            "Please create a .env file from .env.example and supply a valid API key from Google AI Studio."
+            "Please create a .env file from .env.example or configure it in your environment or Streamlit Secrets, "
+            "and supply a valid API key from Google AI Studio."
         )
 
     return api_key
+
+
+def get_gemini_model_name(override_model: str | None = None) -> str:
+    """
+    Resolves the Gemini model identifier to use for answer synthesis.
+
+    Resolution order:
+        1. Explicit override_model argument (if provided and non-empty).
+        2. GEMINI_MODEL environment variable.
+        3. Streamlit secrets 'GEMINI_MODEL' (if available).
+        4. DEFAULT_MODEL_NAME ('gemini-3.8-flash').
+
+    Args:
+        override_model: Optional explicit model identifier string.
+
+    Returns:
+        The resolved model name string.
+    """
+    if override_model and isinstance(override_model, str) and override_model.strip():
+        return override_model.strip()
+
+    env_model = os.environ.get("GEMINI_MODEL", "").strip()
+    if env_model:
+        return env_model
+
+    try:
+        import streamlit as st
+        if hasattr(st, "secrets") and "GEMINI_MODEL" in st.secrets:
+            secret_model = st.secrets["GEMINI_MODEL"]
+            if isinstance(secret_model, str) and secret_model.strip():
+                return secret_model.strip()
+    except Exception:
+        pass
+
+    return DEFAULT_MODEL_NAME
 
 
 def get_gemini_client(api_key: str | None = None) -> genai.Client:
@@ -296,7 +350,7 @@ def generate_answer(
     question: str,
     context_chunks: list[dict[str, Any]],
     client: Any | None = None,
-    model_name: str = DEFAULT_MODEL_NAME,
+    model_name: str | None = None,
     temperature: float = 0.0,
 ) -> dict[str, Any]:
     """
@@ -314,7 +368,7 @@ def generate_answer(
         question: User search query.
         context_chunks: Retrieved document chunks with text and page metadata.
         client: Optional pre-configured genai.Client instance (for testing/dependency injection).
-        model_name: Gemini model identifier (default: gemini-3.8-flash).
+        model_name: Optional Gemini model identifier (default: resolves via get_gemini_model_name()).
         temperature: Sampling temperature (default: 0.0 for minimum variance).
 
     Returns:
@@ -339,12 +393,14 @@ def generate_answer(
     if not isinstance(context_chunks, list):
         raise TypeError(f"context_chunks must be a list, got {type(context_chunks).__name__}")
 
+    resolved_model = get_gemini_model_name(model_name)
+
     # 1. Pre-LLM Guard: If context is empty, return fallback immediately without calling API
     if not context_chunks:
         return {
             "answer": FALLBACK_EMPTY_CONTEXT_MESSAGE,
             "sources": [],
-            "model": model_name,
+            "model": resolved_model,
             "abstention": True,
         }
 
@@ -355,7 +411,7 @@ def generate_answer(
         return {
             "answer": FALLBACK_EMPTY_CONTEXT_MESSAGE,
             "sources": [],
-            "model": model_name,
+            "model": resolved_model,
             "abstention": True,
         }
 
@@ -370,7 +426,7 @@ def generate_answer(
     try:
         config = types.GenerateContentConfig(temperature=temperature)
         response = client.models.generate_content(
-            model=model_name,
+            model=resolved_model,
             contents=prompt,
             config=config,
         )
@@ -394,6 +450,6 @@ def generate_answer(
     return {
         "answer": answer_text,
         "sources": sources,
-        "model": model_name,
+        "model": resolved_model,
         "abstention": is_abstention,
     }

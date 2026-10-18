@@ -14,7 +14,7 @@ DocuMind is an open-source, local-first Retrieval-Augmented Generation (RAG) stu
 ## Live Demo & Screenshots
 
 > [!NOTE]
-> **Deployment Notice:** DocuMind is currently in local development and testing. A hosted live demonstration link on Streamlit Community Cloud will be published here upon completion of the deployment milestone.
+> **Deployment Notice:** DocuMind is deployment-ready for Streamlit Community Cloud (see [Hosted Cloud Deployment](#hosted-cloud-deployment-streamlit-community-cloud) below). A hosted live demonstration link will be published once the live cloud deployment step is executed and verified.
 
 ### Application Preview
 ```
@@ -111,7 +111,7 @@ flowchart TD
 
 | Technology / Library | Version | Purpose in DocuMind |
 | :--- | :---: | :--- |
-| **Python** | `>= 3.10` | Core programming language for the application and test suites. |
+| **Python** | `3.10 – 3.12` | Verified compatible across local development and Streamlit Community Cloud environments. |
 | **Streamlit** | `>= 1.35.0` | Reactive web interface for document uploads, interactive queries, and citation inspection. |
 | **pypdf** | `>= 5.0.0` | Fast, dependency-free PDF parsing, page extraction, and defensive error classification. |
 | **sentence-transformers** | `>= 3.0.0` | Local embedding model (`all-MiniLM-L6-v2`) generating 384-dimensional dense vectors. |
@@ -164,7 +164,7 @@ DocuMind-RAG/
 ## Prerequisites
 
 - **Operating System:** Windows 10/11, macOS, or Linux.
-- **Python:** Version `3.10`, `3.11`, or `3.12` installed and added to system `PATH`.
+- **Python:** Version `3.10`, `3.11`, or `3.12` installed and added to system `PATH` (Python 3.10–3.12 is tested; avoid Python 3.13 on deployment hosts due to pre-compiled binary wheel requirements for PyTorch and ChromaDB).
 - **Google Gemini API Key:** A free API key obtained from [Google AI Studio](https://aistudio.google.com/app/apikey).
 - **Git:** Git CLI for repository cloning.
 
@@ -254,6 +254,58 @@ python app.py
 
 ---
 
+## Hosted Cloud Deployment (Streamlit Community Cloud)
+
+DocuMind is designed for zero-friction cloud deployment on **Streamlit Community Cloud** directly from its public GitHub repository.
+
+### Deployment Walkthrough
+
+1. **Prerequisites for Cloud Deployment:**
+   - A free [Streamlit Community Cloud](https://share.streamlit.io/) account connected to your GitHub account.
+   - Your public repository fork or clone: `https://github.com/DevGoyal9238/documind-rag`.
+   - A valid Google Gemini API key from [Google AI Studio](https://aistudio.google.com/app/apikey).
+
+2. **Deploy the Application:**
+   - Log in to [share.streamlit.io](https://share.streamlit.io/) and click **"Create app"** (or **"New app"**).
+   - Configure the repository settings:
+     - **Repository:** `DevGoyal9238/documind-rag` (or your personal fork)
+     - **Branch:** `main`
+     - **Main file path:** `streamlit_app.py`
+     - **App URL:** (Optional) choose a custom subdomain.
+
+3. **Configure Platform Secrets (Crucial):**
+   - Click **"Advanced settings..."** before deploying (or access **Settings -> Secrets** in the app management menu).
+   - In the **Python version** dropdown, select **3.11** or **3.12** (guarantees pre-compiled binary wheel availability for PyTorch, SentenceTransformers, and ChromaDB SQLite/C++ extensions; do not select 3.13).
+   - In the **Secrets (TOML)** field, paste your Gemini API key:
+     ```toml
+     # Required for Grounded Q&A Synthesis
+     GEMINI_API_KEY = "your_actual_gemini_api_key_here"
+
+     # Optional: Model override (defaults to gemini-3.8-flash if omitted)
+     # GEMINI_MODEL = "gemini-3.8-flash"
+     ```
+   - Click **Save**, then click **Deploy!**
+
+> [!WARNING]
+> **Never commit secrets to Git:** Never create or commit a `.streamlit/secrets.toml` file to your repository. DocuMind's `.gitignore` explicitly excludes `secrets.toml`. Secrets should only be entered directly in the secure Streamlit Community Cloud web dashboard.
+
+### Cloud Architecture & Runtime Considerations
+
+- **Ephemeral Vector Storage (ChromaDB):**
+  Streamlit Community Cloud apps run inside ephemeral container instances. Local database files stored in `./chroma_db/` reside on temporary container storage. When the container goes to sleep after inactivity, restarts, or is redeployed with new code commits, the container filesystem is reset to a fresh state. **Documents previously uploaded and indexed will need to be re-uploaded and re-indexed.** For enterprise production deployments requiring permanent cross-session multi-tenant persistence, an external cloud vector service (such as Pinecone, Qdrant Cloud, or Cloud SQL) would replace the local SQLite-backed ChromaDB store.
+- **Expected Unauthenticated Hugging Face Warning:**
+  During the first cold-start ingestion, `sentence-transformers` downloads the ~90MB `all-MiniLM-L6-v2` embedding weights from Hugging Face. The application console logs may show:
+  ```text
+  huggingface_hub/file_download.py: ... unauthenticated request to https://huggingface.co ...
+  ```
+  This warning is completely normal and expected for public, unauthenticated downloads from Hugging Face Hub. It does not require a Hugging Face API token, does not affect embedding quality or speed, and can safely be disregarded.
+- **Initial Cold-Start Latency:**
+  The very first PDF upload on a cold container instance requires ~15–30 seconds while the container environment caches the PyTorch embedding model. Subsequent vector embeddings and queries run with typical sub-second response times.
+- **Deployment Status:**
+  The codebase has completed Step 2A–2C deployment readiness improvements (Streamlit secrets integration, 25MB upload limits, headless execution flags, and internal error suppression). Live cloud deployment and end-to-end cloud smoke verification will take place in the next milestone.
+
+---
+
 ## Testing & Verification
 
 DocuMind contains an extensive offline test suite implemented with Python's standard `unittest` framework.
@@ -275,12 +327,12 @@ DocuMind contains an extensive offline test suite implemented with Python's stan
 ### Verified Test Results (Latest Audit)
 ```
 ----------------------------------------------------------------------
-Ran 215 tests in 6.672s
+Ran 226 tests in 7.679s
 
 OK (skipped=1)
 ```
-- **Total Tests:** `215`
-- **Passed:** `214`
+- **Total Tests:** `226`
+- **Passed:** `225`
 - **Failures:** `0`
 - **Errors:** `0`
 - **Skipped:** `1` (`test_qa_generator.TestGeminiLiveSmoke`)
@@ -290,11 +342,12 @@ OK (skipped=1)
 
 ---
 
-## Environment Variable Reference
+## Environment Variable & Secrets Reference
 
-| Variable | Required | Default Value | Description |
+| Configuration Key | Required | Default Value | Description |
 | :--- | :---: | :---: | :--- |
-| `GEMINI_API_KEY` | **Yes** (for Q&A) | None | Google AI Studio API key used by `src/qa_generator.py`. If absent, semantic search operates in offline retrieval-only mode. |
+| `GEMINI_API_KEY` | **Yes** (for Q&A) | None | Google AI Studio API key used by `src/qa_generator.py`. Loaded from `.env` / `os.environ` locally, or `st.secrets["GEMINI_API_KEY"]` on Streamlit Community Cloud. |
+| `GEMINI_MODEL` | Optional | `gemini-3.8-flash` | Overrides the Gemini LLM model used for synthesis (e.g. `gemini-2.5-flash`). Loaded from `os.environ` locally or `st.secrets["GEMINI_MODEL"]` on cloud. |
 
 ---
 
@@ -312,7 +365,9 @@ OK (skipped=1)
 1. **Configuration Drift in Vector Indexes:** ChromaDB metadata stores `document_id`, `chunk_id`, and `page_number`, but currently does not record chunking parameters (`chunk_size`, `chunk_overlap`) or the embedding model name. If an administrator alters chunking settings in `src/text_chunker.py`, previously indexed documents will be verified as complete if the chunk count happens to match. An Ingestion Manifest schema is planned to prevent this drift.
 2. **Scanned / Image-Only PDFs:** DocuMind relies on direct character extraction via `pypdf`. Image-only or scanned PDFs without embedded text layers require an external Optical Character Recognition (OCR) engine (such as Tesseract) and will currently raise `NoTextExtractedError`.
 3. **Single-Collection Concurrency:** ChromaDB uses SQLite under the hood. Multiple processes writing concurrently to `./chroma_db` can trigger SQLite file-locking contention.
-4. **Offline vs. Live Test Verification:** 214 of 215 tests run offline using mocks. Live answer quality depends on Google Gemini API availability, latency, and current quota.
+4. **Offline vs. Live Test Verification:** 225 of 226 tests run offline using mocks. Live answer quality depends on Google Gemini API availability, latency, and current quota.
+5. **Ephemeral Vector Storage on Cloud Hosting:** On containerized hosts like Streamlit Community Cloud, local `./chroma_db` disk files are ephemeral and reset upon container rebuilds or sleep cycles.
+6. **Live Cloud Deployment Pending:** Cloud configuration has been implemented and tested with offline mocks, but live runtime deployment on Streamlit Community Cloud has not yet been executed.
 
 ---
 
