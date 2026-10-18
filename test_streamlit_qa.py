@@ -564,11 +564,13 @@ class TestErrorSanitizationInQA(unittest.TestCase):
     """Tests redaction of secrets in QA error messages."""
 
     def test_sanitizes_gemini_api_key_in_qa_error(self):
+        fake_diagnostic_key = "AIza" + "SyMockDiagnosticKeyPatternTest0000"
         err = RuntimeError(
-            "API request failed with AIzaSyC12345678901234567890123456789012 on endpoint https://..."
+            f"API request failed with {fake_diagnostic_key} on endpoint https://..."
         )
         clean = sanitize_error_message(err)
-        self.assertNotIn("AIzaSyC", clean)
+        self.assertNotIn(fake_diagnostic_key, clean)
+        self.assertNotIn("AIza", clean)
         self.assertIn("[REDACTED_KEY]", clean)
 
     def test_sanitizes_bearer_tokens_in_qa_error(self):

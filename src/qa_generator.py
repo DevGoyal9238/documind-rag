@@ -202,34 +202,61 @@ User Question: {clean_question}
 Answer:"""
 
 
-def _sanitize_error_text(text: str) -> str:
+def sanitize_error_message(err: Any) -> str:
     """
-    Sanitizes raw error strings to prevent accidental leakage of API keys,
-    bearer tokens, and sensitive query parameters in exception logs or CLI output.
+    Sanitizes raw error strings or exception instances to prevent accidental leakage
+    of API keys, bearer tokens, and sensitive query parameters in UI banners, CLI output,
+    or logs.
+
+    Args:
+        err: Exception instance, string, or arbitrary error representation.
+
+    Returns:
+        A sanitized string with credentials redacted and normalized whitespace.
+        For empty exceptions (e.g. ValueError("")), returns the exception class name.
     """
-    if not text:
+    if isinstance(err, BaseException):
+        raw = str(err).strip()
+        if not raw:
+            raw = type(err).__name__
+    elif isinstance(err, str):
+        raw = err.strip()
+        if not raw:
+            return ""
+    elif err is None:
         return ""
+    else:
+        raw = str(err).strip()
+        if not raw:
+            return type(err).__name__
 
-    sanitized = text
+    sanitized = raw
 
-    # Redact active GEMINI_API_KEY from environment if present
+    # 1. Redact active GEMINI_API_KEY from environment if present
     env_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if env_key and len(env_key) > 5:
         sanitized = sanitized.replace(env_key, "[REDACTED_KEY]")
 
-    # Redact standard Google AI Studio / Gemini API key patterns (AIzaSy...)
-    sanitized = re.sub(r"AIza[0-9A-Za-z_-]{35}", "[REDACTED_KEY]", sanitized)
+    # 2. Redact variable-length Google API key patterns (e.g. AIzaSy... between 26 and 60 chars)
+    sanitized = re.sub(r"AIza[0-9A-Za-z_-]{26,60}", "[REDACTED_KEY]", sanitized)
 
-    # Redact query parameters like ?key=..., &auth_token=..., etc.
-    sanitized = re.sub(r"(?i)(key|token|auth|secret|password)=[^&\s'\"`]+", r"\1=[REDACTED]", sanitized)
+    # 3. Redact Bearer tokens (standard and base64/JWT)
+    sanitized = re.sub(r"(?i)bearer\s+[a-zA-Z0-9_\-\.\+\=]+", "Bearer [REDACTED]", sanitized)
 
-    # Redact Bearer tokens
-    sanitized = re.sub(r"(?i)bearer\s+[a-zA-Z0-9_\-\.]+", "Bearer [REDACTED]", sanitized)
+    # 4. Redact sensitive query parameters (e.g. ?key=..., &auth=..., &token=..., &secret=..., &password=...)
+    sanitized = re.sub(
+        r"(?i)(\b[\w\-]*(?:key|token|auth|secret|password)[\w\-]*)=[^&\s'\"`]+",
+        r"\1=[REDACTED]",
+        sanitized,
+    )
 
-    # Collapse multiple whitespace/newlines into clean single space
+    # 5. Normalize multiple whitespace and newlines to a clean single space
     sanitized = re.sub(r"\s+", " ", sanitized).strip()
 
     return sanitized
+
+
+_sanitize_error_text = sanitize_error_message
 
 
 def format_api_error_diagnostic(err: Exception) -> str:

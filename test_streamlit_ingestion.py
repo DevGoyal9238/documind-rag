@@ -50,9 +50,11 @@ class TestSanitizeErrorMessage(unittest.TestCase):
     """Tests redaction of secrets, keys, and tokens in error strings."""
 
     def test_redacts_google_api_key(self):
-        raw = "Error connecting with AIzaSyD1234567890abcdef1234567890abcde"
+        fake_diagnostic_key = "AIza" + "SyMockSecretScannerSafePatternTest00"
+        raw = f"Error connecting with {fake_diagnostic_key}"
         sanitized = sanitize_error_message(Exception(raw))
-        self.assertNotIn("AIzaSyD", sanitized)
+        self.assertNotIn(fake_diagnostic_key, sanitized)
+        self.assertNotIn("AIza", sanitized)
         self.assertIn("[REDACTED_KEY]", sanitized)
 
     def test_redacts_query_parameter_secrets(self):
@@ -121,10 +123,11 @@ class TestVerifyExistingIndex(unittest.TestCase):
         is_valid = verify_existing_index(self.mock_col, self.doc_id, expected_chunk_count=1)
         self.assertFalse(is_valid)
 
-    def test_verify_db_error_returns_false_safely(self):
+    def test_verify_db_error_raises_runtime_error(self):
         self.mock_col.get.side_effect = RuntimeError("SQLite database is locked")
-        is_valid = verify_existing_index(self.mock_col, self.doc_id, expected_chunk_count=1)
-        self.assertFalse(is_valid)
+        with self.assertRaises(RuntimeError) as ctx:
+            verify_existing_index(self.mock_col, self.doc_id, expected_chunk_count=1)
+        self.assertIn("Database read failure while verifying index", str(ctx.exception))
 
 
 class TestProcessUploadedPDF(unittest.TestCase):
@@ -294,6 +297,62 @@ class TestProcessUploadedPDF(unittest.TestCase):
                 collection=self.mock_col,
                 embedding_model=self.mock_model,
             )
+
+    @patch("streamlit_app.store_chunks")
+    @patch("streamlit_app.embed_chunks")
+    @patch("streamlit_app.chunk_pages")
+    @patch("streamlit_app.extract_text_from_pdf")
+    def test_process_uploaded_pdf_database_read_failure_aborts_without_deletion_or_embedding(
+        self, mock_extract, mock_chunk, mock_embed, mock_store
+    ):
+        """
+        When ChromaDB fails during verification read, process_uploaded_pdf must abort
+        with RuntimeError and NOT call delete, embed, or store.
+        """
+        mock_extract.return_value = [{"page_number": 1, "text": "Valid extracted text."}]
+        mock_chunk.return_value = [{"chunk_id": 1, "page_number": 1, "text": "Valid extracted text."}]
+        self.mock_col.get.side_effect = RuntimeError("Database read connection lost")
+
+        with self.assertRaises(RuntimeError) as ctx:
+            process_uploaded_pdf(
+                pdf_bytes=self.valid_bytes,
+                filename=self.filename,
+                collection=self.mock_col,
+                embedding_model=self.mock_model,
+            )
+
+        self.assertIn("Database read failure while verifying index", str(ctx.exception))
+        self.mock_col.delete.assert_not_called()
+        mock_embed.assert_not_called()
+        mock_store.assert_not_called()
+
+    @patch("streamlit_app.store_chunks")
+    @patch("streamlit_app.embed_chunks")
+    @patch("streamlit_app.chunk_pages")
+    @patch("streamlit_app.extract_text_from_pdf")
+    def test_process_uploaded_pdf_deletion_failure_aborts_without_embedding_or_storage(
+        self, mock_extract, mock_chunk, mock_embed, mock_store
+    ):
+        """
+        When document-scoped deletion fails, process_uploaded_pdf must abort immediately
+        with RuntimeError and NOT proceed to embedding or storage.
+        """
+        mock_extract.return_value = [{"page_number": 1, "text": "Valid text."}]
+        mock_chunk.return_value = [{"chunk_id": 1, "page_number": 1, "text": "Valid text."}]
+        self.mock_col.get.return_value = {"ids": []}  # Needs rebuild
+        self.mock_col.delete.side_effect = RuntimeError("ChromaDB permission denied on delete")
+
+        with self.assertRaises(RuntimeError) as ctx:
+            process_uploaded_pdf(
+                pdf_bytes=self.valid_bytes,
+                filename=self.filename,
+                collection=self.mock_col,
+                embedding_model=self.mock_model,
+            )
+
+        self.assertIn("Failed to delete records for document", str(ctx.exception))
+        mock_embed.assert_not_called()
+        mock_store.assert_not_called()
 
 
 if __name__ == "__main__":

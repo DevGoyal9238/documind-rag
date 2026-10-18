@@ -1,9 +1,10 @@
 # Python virtual environment
 .venv/
 
-# Python cache files
+# Python cache and testing artifacts
 __pycache__/
 *.py[cod]
+.pytest_cache/
 
 # Environment variables and API secrets
 .env
@@ -12,8 +13,15 @@ __pycache__/
 # Keep an example configuration file if we create one later
 !.env.example
 
+# Streamlit secrets (preserve .streamlit/config.toml)
+.streamlit/secrets.toml
+
+# Logs
+*.log
+
 # Editor and operating system files
 .vscode/
+.idea/
 .DS_Store
 Thumbs.db
 

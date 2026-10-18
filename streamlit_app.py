@@ -50,8 +50,16 @@ from src.vector_store import (
     get_or_create_collection,
     store_chunks,
     query_chunks,
+    verify_existing_index,
+    delete_document_chunks,
 )
-from src.qa_generator import generate_answer, DEFAULT_MODEL_NAME, get_gemini_client
+from src.qa_generator import (
+    generate_answer,
+    DEFAULT_MODEL_NAME,
+    get_gemini_client,
+    sanitize_error_message,
+)
+from src.document_utils import compute_document_id
 
 # ---------------------------------------------------------
 # Page Configuration
@@ -67,107 +75,9 @@ st.set_page_config(
 # ---------------------------------------------------------
 # Pure Helper Functions (Modular & Testable)
 # ---------------------------------------------------------
-def compute_document_id(pdf_bytes: bytes) -> str:
-    """
-    Computes a deterministic, content-addressable document ID using the full
-    64-character SHA-256 cryptographic digest of the PDF binary bytes.
+# Note: compute_document_id, verify_existing_index, delete_document_chunks,
+# and sanitize_error_message are imported from shared modules for cross-tool consistency.
 
-    Args:
-        pdf_bytes: Raw binary content of the PDF file.
-
-    Returns:
-        Document ID string in the format 'doc_<64-character-sha256>'.
-
-    Raises:
-        ValueError: If pdf_bytes is empty.
-    """
-    if not pdf_bytes:
-        raise ValueError("Cannot compute document ID for empty byte payload.")
-    digest = hashlib.sha256(pdf_bytes).hexdigest()
-    return f"doc_{digest}"
-
-
-def sanitize_error_message(err: Exception) -> str:
-    """
-    Sanitizes raw exception strings to prevent accidental leakage of API keys,
-    bearer tokens, or sensitive internal filesystem paths.
-    """
-    raw = str(err).strip()
-    if not raw:
-        return type(err).__name__
-
-    # Redact standard Google AI Studio / Gemini API key patterns (AIzaSy...)
-    sanitized = re.sub(r"AIza[0-9A-Za-z_-]{30,45}", "[REDACTED_KEY]", raw)
-    # Redact query parameters or config keys (key=..., token=..., secret=...)
-    sanitized = re.sub(r"(?i)(key|token|auth|secret|password)=[^&\s'\"`]+", r"\1=[REDACTED]", sanitized)
-    # Redact Bearer tokens
-    sanitized = re.sub(r"(?i)bearer\s+[a-zA-Z0-9_\-\.]+", "Bearer [REDACTED]", sanitized)
-    return sanitized.strip()
-
-
-def verify_existing_index(
-    collection: Any,
-    document_id: str,
-    expected_chunk_count: int,
-) -> bool:
-    """
-    Verifies whether ChromaDB already holds a complete, contiguous, and uncorrupted
-    index for the given document ID.
-
-    Verification Invariants:
-        1. Querying ChromaDB by document_id returns stored records.
-        2. Total stored chunks matches expected_chunk_count exactly.
-        3. Chunk IDs in metadata form a continuous sequence from 1 to expected_chunk_count.
-        4. Stored document texts are non-empty.
-
-    Args:
-        collection: Active ChromaDB Collection instance.
-        document_id: Scoped document identifier (doc_<sha256>).
-        expected_chunk_count: Number of chunks generated from the source PDF.
-
-    Returns:
-        True if the stored index is 100% complete and verified; False otherwise.
-    """
-    if collection is None or not document_id or expected_chunk_count <= 0:
-        return False
-
-    try:
-        existing = collection.get(where={"document_id": document_id})
-    except Exception:
-        return False
-
-    if not existing or not existing.get("ids"):
-        return False
-
-    stored_ids = existing["ids"]
-    if len(stored_ids) != expected_chunk_count:
-        return False
-
-    metadatas = existing.get("metadatas", [])
-    if len(metadatas) != expected_chunk_count:
-        return False
-
-    chunk_ids: list[int] = []
-    for meta in metadatas:
-        if not isinstance(meta, dict):
-            return False
-        cid = meta.get("chunk_id")
-        if not isinstance(cid, int) or isinstance(cid, bool) or cid <= 0:
-            return False
-        chunk_ids.append(cid)
-
-    # Verify that chunk IDs form an unbroken sequential series: 1, 2, ..., N
-    if sorted(chunk_ids) != list(range(1, expected_chunk_count + 1)):
-        return False
-
-    documents = existing.get("documents", [])
-    if len(documents) != expected_chunk_count:
-        return False
-
-    if any(not isinstance(doc, str) or not doc.strip() for doc in documents):
-        return False
-
-    return True
 
 
 def process_uploaded_pdf(
@@ -263,11 +173,7 @@ def process_uploaded_pdf(
         # Step 5: Failure Recovery & Reprocessing
         # If existing index is missing or partial (e.g., from an interrupted previous run),
         # safely delete any orphaned records for THIS document ID before re-indexing.
-        try:
-            collection.delete(where={"document_id": doc_id})
-        except Exception:
-            # Collection may not contain any existing records yet; safe to proceed
-            pass
+        delete_document_chunks(collection, doc_id)
 
         # Step 6: Dense Embedding Generation
         if embedding_model is None:

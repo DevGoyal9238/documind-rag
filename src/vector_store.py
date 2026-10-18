@@ -349,31 +349,83 @@ def query_chunks(
 
     raw_results = collection.query(**query_kwargs)
 
-    raw_ids = raw_results.get("ids", [[]])
-    raw_documents = raw_results.get("documents", [[]])
-    raw_metadatas = raw_results.get("metadatas", [[]])
-    raw_distances = raw_results.get("distances", [[]])
-
-    if not raw_ids or not raw_ids[0]:
+    if not isinstance(raw_results, dict):
         return []
 
-    ids = raw_ids[0]
-    documents = raw_documents[0] if raw_documents else [""] * len(ids)
-    metadatas = raw_metadatas[0] if raw_metadatas else [{}] * len(ids)
-    distances = raw_distances[0] if raw_distances else [0.0] * len(ids)
+    raw_ids = raw_results.get("ids")
+    if not raw_ids or not isinstance(raw_ids, (list, tuple)) or not raw_ids[0]:
+        return []
+
+    raw_ids_sub = raw_ids[0]
+    if not isinstance(raw_ids_sub, (list, tuple)):
+        return []
+
+    # Filter out None or empty string IDs while preserving valid indices
+    valid_indices: list[int] = [
+        idx for idx, item in enumerate(raw_ids_sub)
+        if item is not None and str(item).strip()
+    ]
+    if not valid_indices:
+        return []
+
+    # Safely extract documents sub-array
+    raw_documents = raw_results.get("documents")
+    doc_list: list[Any] = []
+    if raw_documents and isinstance(raw_documents, (list, tuple)) and raw_documents[0] is not None:
+        if isinstance(raw_documents[0], (list, tuple)):
+            doc_list = list(raw_documents[0])
+
+    # Safely extract metadatas sub-array
+    raw_metadatas = raw_results.get("metadatas")
+    meta_list: list[Any] = []
+    if raw_metadatas and isinstance(raw_metadatas, (list, tuple)) and raw_metadatas[0] is not None:
+        if isinstance(raw_metadatas[0], (list, tuple)):
+            meta_list = list(raw_metadatas[0])
+
+    # Safely extract distances sub-array
+    raw_distances = raw_results.get("distances")
+    dist_list: list[Any] = []
+    if raw_distances and isinstance(raw_distances, (list, tuple)) and raw_distances[0] is not None:
+        if isinstance(raw_distances[0], (list, tuple)):
+            dist_list = list(raw_distances[0])
 
     formatted_results: list[dict[str, Any]] = []
-    for i in range(len(ids)):
-        dist = distances[i]
+    for idx in valid_indices:
+        # 1. Inspect text content: skip if missing, None, empty, or whitespace-only
+        if idx >= len(doc_list):
+            continue
+        raw_doc = doc_list[idx]
+        if raw_doc is None:
+            continue
+        text_str = str(raw_doc)
+        if not text_str.strip():
+            continue
+
+        chunk_id_str = str(raw_ids_sub[idx])
+
+        # 2. Distance value with safe fallback (default 1.0 -> similarity 0.0)
+        dist = 1.0
+        if idx < len(dist_list):
+            val = dist_list[idx]
+            if val is not None and not isinstance(val, (bool, np.bool_)):
+                if isinstance(val, (int, float, np.number)) and math.isfinite(val):
+                    dist = float(val)
+
         sim = cosine_distance_to_similarity(dist, round_digits=4)
-        meta = metadatas[i] or {}
+
+        # 3. Metadata dictionary with safe fallback (preserve record even if metadata is missing)
+        meta: dict[str, Any] = {}
+        if idx < len(meta_list):
+            m = meta_list[idx]
+            if isinstance(m, dict):
+                meta = m
 
         formatted_results.append({
-            "id": ids[i],
+            "id": chunk_id_str,
             "chunk_id": meta.get("chunk_id"),
             "page_number": meta.get("page_number"),
             "document_id": meta.get("document_id"),
-            "text": documents[i],
+            "text": text_str,
             "similarity_score": sim,
             "cosine_distance": dist,
         })
@@ -381,3 +433,139 @@ def query_chunks(
     # Sort descending by similarity score
     formatted_results.sort(key=lambda item: item["similarity_score"], reverse=True)
     return formatted_results[:top_k]
+
+
+def verify_existing_index(
+    collection: Any,
+    document_id: str,
+    expected_chunk_count: int,
+) -> bool:
+    """
+    Verifies whether ChromaDB already holds a complete, contiguous, and uncorrupted
+    index for the given document ID.
+
+    Verification Invariants:
+        1. Querying ChromaDB by document_id returns stored records.
+        2. Total stored chunks matches expected_chunk_count exactly.
+        3. Stored chunk IDs strictly match the expected set {f"{document_id}_chunk_{i}"} for i in 1..N.
+        4. Chunk IDs in metadata form an unbroken sequential series from 1 to expected_chunk_count.
+        5. Stored document texts are non-empty and non-whitespace strings.
+        6. All records belong strictly to the requested document ID.
+
+    Limitation note:
+        The ChromaDB chunk metadata schema records document_id, chunk_id, and page_number,
+        but does not record chunking configuration (chunk_size, chunk_overlap) or embedding
+        model name. Verification establishes structural and count completeness for the given
+        chunk count, but assumes consistent project-wide chunking parameters.
+
+    Args:
+        collection: Active ChromaDB Collection instance.
+        document_id: Scoped document identifier (e.g. doc_<sha256>).
+        expected_chunk_count: Expected number of chunks for this document (must be > 0).
+
+    Returns:
+        True if the stored index is 100% complete and verified; False if missing,
+        incomplete, or structurally invalid.
+
+    Raises:
+        RuntimeError: If a database read failure occurs while querying ChromaDB. Callers
+            must distinguish this infrastructure failure from a missing/invalid index and
+            must not automatically trigger deletion or re-indexing during an outage.
+    """
+    if collection is None or not isinstance(document_id, str):
+        return False
+
+    clean_doc_id = document_id.strip()
+    if not clean_doc_id:
+        return False
+
+    if isinstance(expected_chunk_count, bool) or not isinstance(expected_chunk_count, int) or expected_chunk_count <= 0:
+        return False
+
+    try:
+        existing = collection.get(where={"document_id": clean_doc_id})
+    except Exception as err:
+        raise RuntimeError(
+            f"Database read failure while verifying index for document '{clean_doc_id}': {err}"
+        ) from err
+
+    if not isinstance(existing, dict):
+        return False
+
+    stored_ids = existing.get("ids")
+    if not isinstance(stored_ids, list) or len(stored_ids) != expected_chunk_count:
+        return False
+
+    metadatas = existing.get("metadatas")
+    if not isinstance(metadatas, list) or len(metadatas) != expected_chunk_count:
+        return False
+
+    documents = existing.get("documents")
+    if not isinstance(documents, list) or len(documents) != expected_chunk_count:
+        return False
+
+    expected_ids = {f"{clean_doc_id}_chunk_{i}" for i in range(1, expected_chunk_count + 1)}
+    if set(stored_ids) != expected_ids:
+        return False
+
+    chunk_ids: list[int] = []
+    for meta in metadatas:
+        if not isinstance(meta, dict):
+            return False
+        if meta.get("document_id") != clean_doc_id:
+            return False
+        cid = meta.get("chunk_id")
+        if not isinstance(cid, int) or isinstance(cid, bool) or cid <= 0:
+            return False
+        page_num = meta.get("page_number")
+        if page_num is not None:
+            if not isinstance(page_num, int) or isinstance(page_num, bool) or page_num <= 0:
+                return False
+        chunk_ids.append(cid)
+
+    if sorted(chunk_ids) != list(range(1, expected_chunk_count + 1)):
+        return False
+
+    for doc in documents:
+        if not isinstance(doc, str) or not doc.strip():
+            return False
+
+    return True
+
+
+def delete_document_chunks(
+    collection: Any,
+    document_id: str,
+) -> None:
+    """
+    Deletes all vector store records belonging strictly to a specific document ID.
+
+    Scoping deletion strictly by document_id prevents accidental data loss across
+    other indexed documents in the shared collection.
+
+    Args:
+        collection: Active ChromaDB Collection instance.
+        document_id: Scoped document identifier (e.g. doc_<sha256>).
+
+    Raises:
+        TypeError: If collection is None or document_id is not a string.
+        ValueError: If document_id is empty or whitespace-only.
+        RuntimeError: If ChromaDB fails to execute the deletion.
+    """
+    if collection is None:
+        raise TypeError("collection cannot be None")
+
+    if not isinstance(document_id, str):
+        raise TypeError(f"document_id must be a string, got {type(document_id).__name__}")
+
+    clean_doc_id = document_id.strip()
+    if not clean_doc_id:
+        raise ValueError("document_id cannot be empty or whitespace-only")
+
+    try:
+        collection.delete(where={"document_id": clean_doc_id})
+    except Exception as err:
+        raise RuntimeError(
+            f"Failed to delete records for document '{clean_doc_id}': {err}"
+        ) from err
+

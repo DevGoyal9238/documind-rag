@@ -19,6 +19,7 @@ from src.qa_generator import (
     build_rag_prompt,
     generate_answer,
     format_api_error_diagnostic,
+    sanitize_error_message,
 )
 
 
@@ -340,6 +341,95 @@ class TestErrorDiagnosticSanitization(unittest.TestCase):
         err = TimeoutError("Connection timed out waiting for gateway")
         diag = format_api_error_diagnostic(err)
         self.assertEqual(diag, "TimeoutError: Connection timed out waiting for gateway")
+
+
+class TestSanitizeErrorMessage(unittest.TestCase):
+    """
+    Focused tests for unified error sanitization.
+    Verifies redaction of custom env keys, variable-length Google API keys,
+    bearer tokens, and sensitive query parameters, while preserving ordinary error
+    diagnostics and handling already-sanitized errors without mangling.
+    """
+
+    @patch.dict(os.environ, {"GEMINI_API_KEY": "fake_custom_env_key_for_test_67890"}, clear=True)
+    def test_custom_environment_api_key_redacted(self):
+        err = Exception("Request failed with key fake_custom_env_key_for_test_67890 during API call")
+        sanitized = sanitize_error_message(err)
+        self.assertNotIn("fake_custom_env_key_for_test_67890", sanitized)
+        self.assertIn("[REDACTED_KEY]", sanitized)
+
+    def test_google_style_key_patterns_variable_lengths(self):
+        # 30-char suffix after AIza (34 total chars)
+        key_30 = "AIza" + "A" * 30
+        sanitized_30 = sanitize_error_message(f"Key rejected: {key_30}")
+        self.assertNotIn(key_30, sanitized_30)
+        self.assertIn("[REDACTED_KEY]", sanitized_30)
+
+        # Standard 35-char suffix after AIza (39 total chars)
+        key_35 = "AIza" + "B" * 35
+        sanitized_35 = sanitize_error_message(f"Key rejected: {key_35}")
+        self.assertNotIn(key_35, sanitized_35)
+        self.assertIn("[REDACTED_KEY]", sanitized_35)
+
+        # 45-char suffix after AIza (49 total chars)
+        key_45 = "AIza" + "C" * 45
+        sanitized_45 = sanitize_error_message(f"Key rejected: {key_45}")
+        self.assertNotIn(key_45, sanitized_45)
+        self.assertIn("[REDACTED_KEY]", sanitized_45)
+
+    def test_bearer_tokens_redacted(self):
+        # Standard bearer token
+        sanitized_standard = sanitize_error_message("HTTP 401: Bearer ya29.a0AfH6SMA-test_token_12345")
+        self.assertNotIn("ya29", sanitized_standard)
+        self.assertIn("Bearer [REDACTED]", sanitized_standard)
+
+        # JWT-style bearer token
+        sanitized_jwt = sanitize_error_message("Unauthorized for Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.token123")
+        self.assertNotIn("eyJhbGci", sanitized_jwt)
+        self.assertIn("Bearer [REDACTED]", sanitized_jwt)
+
+    def test_sensitive_query_parameters_redacted(self):
+        raw_url = "GET https://generativelanguage.googleapis.com/v1beta/models?key=sec_123&token=tok_456&auth=auth_789&secret=sec_999&password=pwd_000&api_key=ak_111"
+        sanitized = sanitize_error_message(raw_url)
+        self.assertNotIn("sec_123", sanitized)
+        self.assertNotIn("tok_456", sanitized)
+        self.assertNotIn("auth_789", sanitized)
+        self.assertNotIn("sec_999", sanitized)
+        self.assertNotIn("pwd_000", sanitized)
+        self.assertNotIn("ak_111", sanitized)
+        self.assertIn("key=[REDACTED]", sanitized)
+        self.assertIn("token=[REDACTED]", sanitized)
+        self.assertIn("auth=[REDACTED]", sanitized)
+        self.assertIn("secret=[REDACTED]", sanitized)
+        self.assertIn("password=[REDACTED]", sanitized)
+        self.assertIn("api_key=[REDACTED]", sanitized)
+
+    def test_ordinary_errors_remain_understandable(self):
+        fnf_err = FileNotFoundError("Document '/data/sample_doc.pdf' does not exist")
+        self.assertEqual(
+            sanitize_error_message(fnf_err),
+            "Document '/data/sample_doc.pdf' does not exist",
+        )
+
+        val_err = ValueError("Expected 384 dimensions, got 512")
+        self.assertEqual(
+            sanitize_error_message(val_err),
+            "Expected 384 dimensions, got 512",
+        )
+
+    def test_empty_error_messages_do_not_return_empty_string(self):
+        self.assertEqual(sanitize_error_message(ValueError("")), "ValueError")
+        self.assertEqual(sanitize_error_message(RuntimeError("   ")), "RuntimeError")
+
+    def test_already_sanitized_errors_not_mangled(self):
+        already_clean = "Database Error: [REDACTED_KEY] Bearer [REDACTED] key=[REDACTED]"
+        self.assertEqual(sanitize_error_message(already_clean), already_clean)
+
+    def test_string_and_none_input_handled_safely(self):
+        self.assertEqual(sanitize_error_message("Simple string error"), "Simple string error")
+        self.assertEqual(sanitize_error_message(""), "")
+        self.assertEqual(sanitize_error_message("   "), "")
+        self.assertEqual(sanitize_error_message(None), "")
 
 
 def _is_valid_live_gemini_key(key: str | None) -> bool:

@@ -508,6 +508,155 @@ class TestChromaDBIntegration(unittest.TestCase):
             gc.collect()
 
 
+class TestQueryChunksMalformedResults(unittest.TestCase):
+    """Tests query_chunks resilience against missing result keys, None arrays, empty arrays, and mismatched lengths."""
+
+    def setUp(self):
+        self.mock_col = MagicMock()
+        self.mock_col.count.return_value = 5
+        self.vec = make_test_vector(1.0)
+
+    def test_missing_optional_keys(self):
+        """When ChromaDB omits documents entirely, records have missing text and are safely excluded."""
+        self.mock_col.query.return_value = {
+            "ids": [["doc_chunk_1"]],
+        }
+        results = query_chunks(self.vec, self.mock_col, top_k=3)
+        self.assertEqual(results, [])
+
+    def test_none_top_level_arrays(self):
+        """When documents is None, records have missing text and are safely excluded without crashing."""
+        self.mock_col.query.return_value = {
+            "ids": [["doc_chunk_1"]],
+            "documents": None,
+            "metadatas": None,
+            "distances": None,
+        }
+        results = query_chunks(self.vec, self.mock_col, top_k=3)
+        self.assertEqual(results, [])
+
+    def test_none_inner_arrays(self):
+        """When documents contains [None], records have None text and are safely excluded without subscript errors."""
+        self.mock_col.query.return_value = {
+            "ids": [["doc_chunk_1"]],
+            "documents": [None],
+            "metadatas": [None],
+            "distances": [None],
+        }
+        results = query_chunks(self.vec, self.mock_col, top_k=3)
+        self.assertEqual(results, [])
+
+    def test_empty_and_whitespace_text_records_excluded(self):
+        """Records with empty string, whitespace-only, or None text are excluded, preserving valid records."""
+        self.mock_col.query.return_value = {
+            "ids": [["c_empty", "c_spaces", "c_tabs", "c_none", "c_valid"]],
+            "documents": [["", "   ", "\n\t\r", None, "Valid chunk content"]],
+            "metadatas": [[
+                {"chunk_id": 1, "page_number": 1, "document_id": "doc"},
+                {"chunk_id": 2, "page_number": 1, "document_id": "doc"},
+                {"chunk_id": 3, "page_number": 1, "document_id": "doc"},
+                {"chunk_id": 4, "page_number": 1, "document_id": "doc"},
+                {"chunk_id": 5, "page_number": 2, "document_id": "doc"},
+            ]],
+            "distances": [[0.1, 0.2, 0.3, 0.4, 0.25]],
+        }
+        results = query_chunks(self.vec, self.mock_col, top_k=5)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["id"], "c_valid")
+        self.assertEqual(results[0]["text"], "Valid chunk content")
+        self.assertEqual(results[0]["chunk_id"], 5)
+        self.assertEqual(results[0]["page_number"], 2)
+        self.assertAlmostEqual(results[0]["similarity_score"], 0.75, places=4)
+
+    def test_valid_record_with_missing_optional_metadata_or_distance_preserved(self):
+        """A record with valid text is preserved even when metadatas or distances are missing or None."""
+        self.mock_col.query.return_value = {
+            "ids": [["doc_chunk_1"]],
+            "documents": [["Valid passage text"]],
+            "metadatas": None,
+            "distances": None,
+        }
+        results = query_chunks(self.vec, self.mock_col, top_k=3)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["id"], "doc_chunk_1")
+        self.assertEqual(results[0]["text"], "Valid passage text")
+        self.assertIsNone(results[0]["chunk_id"])
+        self.assertIsNone(results[0]["page_number"])
+        self.assertIsNone(results[0]["document_id"])
+        self.assertEqual(results[0]["cosine_distance"], 1.0)
+        self.assertEqual(results[0]["similarity_score"], 0.0)
+
+    def test_preserves_ranking_and_scores_for_valid_records_while_skipping_empty_text(self):
+        """Valid records retain exact similarity scores and relative ranking while empty-text records are omitted."""
+        self.mock_col.query.return_value = {
+            "ids": [["c1", "c2_empty", "c3", "c4_ws"]],
+            "documents": [["Top ranked passage", "", "Lower ranked passage", "   "]],
+            "metadatas": [[
+                {"chunk_id": 1, "page_number": 1, "document_id": "guide"},
+                {"chunk_id": 2, "page_number": 1, "document_id": "guide"},
+                {"chunk_id": 3, "page_number": 2, "document_id": "guide"},
+                {"chunk_id": 4, "page_number": 2, "document_id": "guide"},
+            ]],
+            "distances": [[0.1, 0.05, 0.4, 0.01]],
+        }
+        results = query_chunks(self.vec, self.mock_col, top_k=5)
+        self.assertEqual(len(results), 2)
+
+        # Rank 1: c1 (dist 0.1 -> sim 0.9)
+        self.assertEqual(results[0]["id"], "c1")
+        self.assertEqual(results[0]["text"], "Top ranked passage")
+        self.assertEqual(results[0]["similarity_score"], 0.9)
+        self.assertEqual(results[0]["chunk_id"], 1)
+
+        # Rank 2: c3 (dist 0.4 -> sim 0.6)
+        self.assertEqual(results[1]["id"], "c3")
+        self.assertEqual(results[1]["text"], "Lower ranked passage")
+        self.assertEqual(results[1]["similarity_score"], 0.6)
+        self.assertEqual(results[1]["chunk_id"], 3)
+
+    def test_none_or_empty_ids_returns_empty_list(self):
+        """When ids array is None, empty, or contains only [None] or [[]], returns []."""
+        for bad_ids in [None, [], [None], [[]]]:
+            with self.subTest(ids=bad_ids):
+                self.mock_col.query.return_value = {"ids": bad_ids}
+                results = query_chunks(self.vec, self.mock_col, top_k=3)
+                self.assertEqual(results, [])
+
+    def test_empty_inner_arrays(self):
+        """When all arrays contain empty lists [[]], returns []."""
+        self.mock_col.query.return_value = {
+            "ids": [[]],
+            "documents": [[]],
+            "metadatas": [[]],
+            "distances": [[]],
+        }
+        results = query_chunks(self.vec, self.mock_col, top_k=3)
+        self.assertEqual(results, [])
+
+    def test_mismatched_result_lengths(self):
+        """When documents has fewer elements than ids, records without text are skipped without IndexError."""
+        self.mock_col.query.return_value = {
+            "ids": [["doc_chunk_1", "doc_chunk_2", "doc_chunk_3"]],
+            "documents": [["First chunk text"]],
+            "metadatas": [[{"chunk_id": 1, "page_number": 1, "document_id": "guide"}]],
+            "distances": [[0.2, 0.8]],  # 2 distances for 3 IDs
+        }
+        results = query_chunks(self.vec, self.mock_col, top_k=3)
+        # Only doc_chunk_1 has text; doc_chunk_2 and doc_chunk_3 lack documents so they are skipped
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["id"], "doc_chunk_1")
+        self.assertEqual(results[0]["similarity_score"], 0.8)
+        self.assertEqual(results[0]["text"], "First chunk text")
+        self.assertEqual(results[0]["chunk_id"], 1)
+
+    def test_non_dict_query_result_returns_empty_list(self):
+        """When query() returns an unexpected non-dict type, returns []."""
+        for bad_res in ["not a dict", None, 123, []]:
+            with self.subTest(raw_results=bad_res):
+                self.mock_col.query.return_value = bad_res
+                results = query_chunks(self.vec, self.mock_col, top_k=3)
+                self.assertEqual(results, [])
+
 
 if __name__ == "__main__":
     unittest.main()
