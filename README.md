@@ -1,9 +1,11 @@
 # DocuMind — AI-Powered PDF Study Assistant & Grounded RAG System
 
+[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://documind-raggit-kdamgnnyfcebse64m5huas.streamlit.app/)
+[![Live Demo](https://img.shields.io/badge/Live%20Demo-Streamlit%20Cloud-FF4B4B.svg?style=flat&logo=streamlit&logoColor=white)](https://documind-raggit-kdamgnnyfcebse64m5huas.streamlit.app/)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
-[![Streamlit](https://img.shields.io/badge/Frontend-Streamlit-FF4B4B.svg)](https://streamlit.io/)
-[![ChromaDB](https://img.shields.io/badge/Vector%20Store-ChromaDB-orange.svg)](https://www.trychroma.com/)
-[![Google Gemini](https://img.shields.io/badge/LLM-Gemini%203.8%20Flash-4285F4.svg)](https://ai.google.dev/)
+[![Frontend: Streamlit](https://img.shields.io/badge/Frontend-Streamlit-FF4B4B.svg)](https://streamlit.io/)
+[![Vector Store: ChromaDB](https://img.shields.io/badge/Vector%20Store-ChromaDB-orange.svg)](https://www.trychroma.com/)
+[![LLM: Gemini 3.8 Flash](https://img.shields.io/badge/LLM-Gemini%203.8%20Flash-4285F4.svg)](https://ai.google.dev/)
 [![Embeddings](https://img.shields.io/badge/Embeddings-all--MiniLM--L6--v2-green.svg)](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -11,10 +13,15 @@ DocuMind is an open-source, local-first Retrieval-Augmented Generation (RAG) stu
 
 ---
 
-## Live Demo & Screenshots
+## Live Demo & Web App
 
-> [!NOTE]
-> **Deployment Notice:** DocuMind is deployment-ready for Streamlit Community Cloud (see [Hosted Cloud Deployment](#hosted-cloud-deployment-streamlit-community-cloud) below). A hosted live demonstration link will be published once the live cloud deployment step is executed and verified.
+[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://documind-raggit-kdamgnnyfcebse64m5huas.streamlit.app/)
+
+> [!TIP]
+> **Experience the Live Application:** DocuMind is deployed and active on Streamlit Community Cloud:
+> 👉 **[documind-raggit-kdamgnnyfcebse64m5huas.streamlit.app](https://documind-raggit-kdamgnnyfcebse64m5huas.streamlit.app/)**
+>
+> Upload your academic paper, technical documentation, or textbook PDF to immediately experience grounded question answering with exact page citations and similarity scoring.
 
 ### Application Preview
 ```
@@ -302,7 +309,7 @@ DocuMind is designed for zero-friction cloud deployment on **Streamlit Community
 - **Initial Cold-Start Latency:**
   The very first PDF upload on a cold container instance requires ~15–30 seconds while the container environment caches the PyTorch embedding model. Subsequent vector embeddings and queries run with typical sub-second response times.
 - **Deployment Status:**
-  The codebase has completed Step 2A–2C deployment readiness improvements (Streamlit secrets integration, 25MB upload limits, headless execution flags, and internal error suppression). Live cloud deployment and end-to-end cloud smoke verification will take place in the next milestone.
+  The live cloud web application is deployed and verified on Streamlit Community Cloud at [documind-raggit-kdamgnnyfcebse64m5huas.streamlit.app](https://documind-raggit-kdamgnnyfcebse64m5huas.streamlit.app/). Continuous deployment is enabled directly from the GitHub `main` branch.
 
 ---
 
@@ -367,7 +374,7 @@ OK (skipped=1)
 3. **Single-Collection Concurrency:** ChromaDB uses SQLite under the hood. Multiple processes writing concurrently to `./chroma_db` can trigger SQLite file-locking contention.
 4. **Offline vs. Live Test Verification:** 225 of 226 tests run offline using mocks. Live answer quality depends on Google Gemini API availability, latency, and current quota.
 5. **Ephemeral Vector Storage on Cloud Hosting:** On containerized hosts like Streamlit Community Cloud, local `./chroma_db` disk files are ephemeral and reset upon container rebuilds or sleep cycles.
-6. **Live Cloud Deployment Pending:** Cloud configuration has been implemented and tested with offline mocks, but live runtime deployment on Streamlit Community Cloud has not yet been executed.
+6. **Ephemeral Vector Storage on Cloud Hosting:** On containerized hosts like Streamlit Community Cloud, local `./chroma_db` disk files are ephemeral and reset upon container rebuilds or sleep cycles. Uploaded PDFs will need to be re-indexed after inactivity sleeps.
 
 ---
 
